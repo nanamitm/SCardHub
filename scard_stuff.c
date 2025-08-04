@@ -226,6 +226,7 @@ static void extend_handle_buf(int n) {
 	s_handle_buf_count += n;
 	s_handle_buf = pp = realloc(s_handle_buf, sizeof(*pp) * s_handle_buf_count);
 	assert(pp);
+	if (!pp) return;
 
 	p = scmalloc(0, sizeof(*p) * n);
 	assert(p);
@@ -508,9 +509,10 @@ static BOOL is_reader_registered(LPCSTR szRealReaders, LPCSTR testee) {
 static wchar_t *mbs2wcsdup(const char *s) {
 	wchar_t *dst;
 	size_t chars;
-	char locale_save[64];
+	char locale_save[64], *ret;
 
-	strcpy(locale_save, setlocale(LC_ALL, NULL));
+	if ((ret = setlocale(LC_ALL, NULL)) == NULL) return NULL;
+	strcpy(locale_save, ret);
 	setlocale(LC_ALL, ".OCP");
 
 	chars = mbstowcs(NULL, s, 0) + 1;

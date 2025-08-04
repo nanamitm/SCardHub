@@ -1,9 +1,11 @@
 EXPORTS
 	SCardAccessStartedEvent
+	SCardBeginTransaction
 	SCardCancel
 	SCardConnectA
 	SCardConnectW
 	SCardDisconnect
+	SCardEndTransaction
 	SCardEstablishContext
 	SCardFreeMemory
 	SCardGetStatusChangeA
