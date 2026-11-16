@@ -832,6 +832,20 @@ BOOL is_fakereaderW(LPCWSTR szReader) {
 	return (p && p->dll);
 }
 
+LONG reader_stateA(LPCSTR reader, LPSCARD_READERSTATEA state) {
+	reader_t *p = find_readerA(&s_reader, reader);
+	if (!p || !p->dll)
+		return SCARD_E_UNKNOWN_READER;
+	return p->dll->reader_state(p->dll, p->realname, state);
+}
+
+LONG reader_stateW(LPCWSTR reader, LPSCARD_READERSTATEA state) {
+	reader_t *p = find_readerW(&s_reader, reader);
+	if (!p || !p->dll)
+		return SCARD_E_UNKNOWN_READER;
+	return p->dll->reader_state(p->dll, p->realname, state);
+}
+
 /****************************************************************************/
 
 /**

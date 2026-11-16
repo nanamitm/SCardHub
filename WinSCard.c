@@ -278,7 +278,11 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
 	else if (fdwReason == DLL_PROCESS_DETACH) {
 		DEBUGLOG(("-------- DLL_PROCESS_DETACH { %s\n", dll_path));
 
-		scard_stuff_destruct();
+		/* プロセス終了時は他スレッドと下位 DLL の終了順を保証できない。
+		 * IPC を伴う解放処理は明示的な DLL アンロード時だけ行い、
+		 * プロセス終了時のメモリとハンドルの回収は OS に任せる。 */
+		if (!lpvReserved)
+			scard_stuff_destruct();
 
 		DEBUGLOG(("-------- DLL_PROCESS_DETACH } %s\n", dll_path));
 	}
@@ -294,11 +298,20 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
  *	これを回避するため、当該エントリを要する初期化手続きは、
  *	アプリからSCardEstablishContextが初めて呼ばれるタイミングで行う。
  */
-static void hubinit(void) {
+static BOOL hubinit(void) {
 	static BOOL passed_through = FALSE;
+	HMODULE pinned;
 
 	if (passed_through)
-		return;
+		return TRUE;
+
+	/* TvCas の切り替えで Hub が解放されると、次のモジュールの WinSCard
+	 * インポートが既にロード済みの System32 DLL に結び付く。
+	 * Hub をプロセス終了まで保持し、内蔵リーダーへの入口を維持する。
+	 * システム DLL との同名衝突を避けるため、名前ではなく自身のアドレスを使う。 */
+	if (!GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+		(LPCTSTR)g_hinstDLL, &pinned))
+		return FALSE;
 
 	passed_through = TRUE;
 
@@ -311,6 +324,7 @@ static void hubinit(void) {
 	scard_hub_ready(g_hinstDLL);
 
 	DEBUGLOG(("hubinit }\n"));
+	return TRUE;
 }
 
 /****************************************************************************/
@@ -346,7 +360,7 @@ HANDLE WINAPI SCardAccessStartedEvent(void) {
 	return F(SCardAccessStartedEvent)();
 }
 
-LONG SCardBeginTransaction(
+LONG WINAPI SCardBeginTransaction(
 	_In_       SCARDHANDLE hCard
 )
 {
@@ -437,7 +451,7 @@ LONG WINAPI SCardDisconnect(
 	return card_disconnect(hCard, dwDisposition);
 }
 
-LONG SCardEndTransaction(
+LONG WINAPI SCardEndTransaction(
 	_In_    SCARDHANDLE hCard,
 	_In_    DWORD dwDisposition)
 {
@@ -465,7 +479,8 @@ LONG WINAPI SCardEstablishContext(
 
 	DEBUGLOG((__FUNCTION__ "(...)\n"));
 
-	hubinit();
+	if (!hubinit())
+		return SCARD_F_INTERNAL_ERROR;
 
 	if (!phContext)
 		return SCARD_E_INVALID_PARAMETER;
@@ -551,15 +566,33 @@ LONG WINAPI SCardGetStatusChangeA(
 			continue;
 		}
 
-		p->dwEventState = SCARD_STATE_PRESENT;
-		p->cbAtr = sizeof(kBCAS_ATR);
-		memcpy(p->rgbAtr, kBCAS_ATR, sizeof(kBCAS_ATR));
-		if (p->dwCurrentState == SCARD_STATE_UNAWARE)
-			continue;
-		if ((p->dwCurrentState & SCARD_STATE_PRESENT) == 0) {
-			Sleep(0);
-			p->dwEventState |= SCARD_STATE_CHANGED;
-			continue;
+		{
+			SCARD_READERSTATEA actual = {0};
+			LONG status_result;
+			actual.dwCurrentState = p->dwCurrentState;
+			status_result = reader_stateA(p->szReader, &actual);
+			if (status_result == SCARD_E_UNSUPPORTED_FEATURE) {
+				/* 状態 API のない旧式 DLL の列挙動作を維持する。 */
+				actual.dwEventState = SCARD_STATE_PRESENT;
+				actual.cbAtr = sizeof(kBCAS_ATR);
+				memcpy(actual.rgbAtr, kBCAS_ATR, sizeof(kBCAS_ATR));
+				if (!(p->dwCurrentState & SCARD_STATE_PRESENT))
+					actual.dwEventState |= SCARD_STATE_CHANGED;
+			} else if (status_result != SCARD_S_SUCCESS && status_result != SCARD_E_TIMEOUT) {
+				free(realReaderStates);
+				return status_result;
+			}
+			if (actual.cbAtr > sizeof(p->rgbAtr)) {
+				free(realReaderStates);
+				return SCARD_F_INTERNAL_ERROR;
+			}
+			p->dwEventState = actual.dwEventState;
+			p->cbAtr = actual.cbAtr;
+			memset(p->rgbAtr, 0, sizeof(p->rgbAtr));
+			memcpy(p->rgbAtr, actual.rgbAtr, actual.cbAtr);
+			if (p->dwCurrentState == SCARD_STATE_UNAWARE ||
+				(p->dwEventState & SCARD_STATE_CHANGED))
+				continue;
 		}
 		if (result != SCARD_E_TIMEOUT) {
 			Sleep(dwTimeout); /* INFINITEは来ないハズ */
@@ -618,15 +651,33 @@ LONG WINAPI SCardGetStatusChangeW(
 			continue;
 		}
 
-		p->dwEventState = SCARD_STATE_PRESENT;
-		p->cbAtr = sizeof(kBCAS_ATR);
-		memcpy(p->rgbAtr, kBCAS_ATR, sizeof(kBCAS_ATR));
-		if (p->dwCurrentState == SCARD_STATE_UNAWARE)
-			continue;
-		if ((p->dwCurrentState & SCARD_STATE_PRESENT) == 0) {
-			Sleep(0);
-			p->dwEventState |= SCARD_STATE_CHANGED;
-			continue;
+		{
+			SCARD_READERSTATEA actual = {0};
+			LONG status_result;
+			actual.dwCurrentState = p->dwCurrentState;
+			status_result = reader_stateW(p->szReader, &actual);
+			if (status_result == SCARD_E_UNSUPPORTED_FEATURE) {
+				/* 状態 API のない旧式 DLL の列挙動作を維持する。 */
+				actual.dwEventState = SCARD_STATE_PRESENT;
+				actual.cbAtr = sizeof(kBCAS_ATR);
+				memcpy(actual.rgbAtr, kBCAS_ATR, sizeof(kBCAS_ATR));
+				if (!(p->dwCurrentState & SCARD_STATE_PRESENT))
+					actual.dwEventState |= SCARD_STATE_CHANGED;
+			} else if (status_result != SCARD_S_SUCCESS && status_result != SCARD_E_TIMEOUT) {
+				free(realReaderStates);
+				return status_result;
+			}
+			if (actual.cbAtr > sizeof(p->rgbAtr)) {
+				free(realReaderStates);
+				return SCARD_F_INTERNAL_ERROR;
+			}
+			p->dwEventState = actual.dwEventState;
+			p->cbAtr = actual.cbAtr;
+			memset(p->rgbAtr, 0, sizeof(p->rgbAtr));
+			memcpy(p->rgbAtr, actual.rgbAtr, actual.cbAtr);
+			if (p->dwCurrentState == SCARD_STATE_UNAWARE ||
+				(p->dwEventState & SCARD_STATE_CHANGED))
+				continue;
 		}
 		if (result != SCARD_E_TIMEOUT) {
 			Sleep(dwTimeout); /* INFINITEは来ないハズ */
@@ -823,6 +874,19 @@ void WINAPI SCardReleaseStartedEvent(void) {
 	F(SCardReleaseStartedEvent)();
 }
 
+/* 状態 API を持つ DLL では実カードの ATR を使う。旧式 DLL だけ従来の互換値を残す。 */
+static LONG query_dll_card_status(SCARDHANDLE card, LPDWORD state, LPDWORD protocol,
+								 LPBYTE atr, LPDWORD atr_len) {
+	scard_trans_t *tr = get_card_trans(card);
+	if (tr->status)
+		return tr->status(tr, state, protocol, atr, atr_len);
+	*state = SCARD_SPECIFIC;
+	*protocol = SCARD_PROTOCOL_T1;
+	memcpy(atr, kBCAS_ATR, sizeof(kBCAS_ATR));
+	*atr_len = sizeof(kBCAS_ATR);
+	return SCARD_S_SUCCESS;
+}
+
 LONG WINAPI SCardStatusA(
 	_In_        SCARDHANDLE hCard,
 	_When_(_Old_(*pcchReaderLen) == SCARD_AUTOALLOCATE, _At_((LPSTR*)mszReaderNames, _Outptr_result_buffer_maybenull_(*pcchReaderLen) _At_(*_Curr_, _Post_z_ _Post_ _NullNull_terminated_)))
@@ -840,6 +904,9 @@ LONG WINAPI SCardStatusA(
 	SCARDCONTEXT hContext;
 	LPCSTR szReader;
 	void *mem1 = NULL, *mem2 = NULL;
+	BYTE atr[sizeof(((SCARD_READERSTATEA *)0)->rgbAtr)];
+	DWORD atr_len = sizeof(atr), state, protocol;
+	LONG result;
 
 	DEBUGLOG((__FUNCTION__ "(\"%s\", ...)\n", get_card_readerA(hCard)));
 
@@ -848,6 +915,12 @@ LONG WINAPI SCardStatusA(
 
 	if (hRealCard)
 		return F(SCardStatusA)(hRealCard, mszReaderNames, pcchReaderLen, pdwState, pdwProtocol, pbAtr, pcbAtrLen);
+
+	result = query_dll_card_status(hCard, &state, &protocol, atr, &atr_len);
+	if (result != SCARD_S_SUCCESS)
+		return result;
+	if (atr_len > sizeof(atr))
+		return SCARD_F_INTERNAL_ERROR;
 
 	hContext = get_card_context(hCard);
 	szReader = get_card_readerA(hCard);
@@ -874,31 +947,31 @@ LONG WINAPI SCardStatusA(
 	}
 
 	if (pdwState)
-		*pdwState = SCARD_STATE_CHANGED | SCARD_STATE_UNKNOWN;
+		*pdwState = state;
 
 	if (pdwProtocol)
-		*pdwProtocol = SCARD_PROTOCOL_T1;
+		*pdwProtocol = protocol;
 
 	if (pcbAtrLen) {
 		LPBYTE dst = pbAtr;
 		if (pbAtr) {
 			if (*pcbAtrLen == SCARD_AUTOALLOCATE) {
-				mem2 = scmalloc(hContext, sizeof(kBCAS_ATR));
+				mem2 = scmalloc(hContext, atr_len);
 				if (!mem2) {
 					scfree(hContext, mem1);
 					return SCARD_E_NO_MEMORY;
 				}
 				dst = *(LPBYTE *)pbAtr = mem2;
-				*pcbAtrLen = sizeof(kBCAS_ATR);
+				*pcbAtrLen = atr_len;
 			}
-			else if (*pcbAtrLen < sizeof(kBCAS_ATR)) {
-				*pcbAtrLen = sizeof(kBCAS_ATR);
+			else if (*pcbAtrLen < atr_len) {
+				*pcbAtrLen = atr_len;
 				scfree(hContext, mem1);
 				return SCARD_E_INSUFFICIENT_BUFFER;
 			}
-			memcpy(dst, kBCAS_ATR, sizeof(kBCAS_ATR));
+			memcpy(dst, atr, atr_len);
 		}
-		*pcbAtrLen = sizeof(kBCAS_ATR);
+		*pcbAtrLen = atr_len;
 	}
 
 	return SCARD_S_SUCCESS;
@@ -921,6 +994,9 @@ LONG WINAPI SCardStatusW(
 	SCARDCONTEXT hContext;
 	LPCWSTR szReader;
 	void *mem1 = NULL, *mem2 = NULL;
+	BYTE atr[sizeof(((SCARD_READERSTATEA *)0)->rgbAtr)];
+	DWORD atr_len = sizeof(atr), state, protocol;
+	LONG result;
 
 	DEBUGLOG((__FUNCTION__ "(\"%s\", ...)\n", get_card_readerA(hCard)));
 
@@ -929,6 +1005,12 @@ LONG WINAPI SCardStatusW(
 
 	if (hRealCard)
 		return F(SCardStatusW)(hRealCard, mszReaderNames, pcchReaderLen, pdwState, pdwProtocol, pbAtr, pcbAtrLen);
+
+	result = query_dll_card_status(hCard, &state, &protocol, atr, &atr_len);
+	if (result != SCARD_S_SUCCESS)
+		return result;
+	if (atr_len > sizeof(atr))
+		return SCARD_F_INTERNAL_ERROR;
 
 	hContext = get_card_context(hCard);
 	szReader = get_card_readerW(hCard);
@@ -955,30 +1037,30 @@ LONG WINAPI SCardStatusW(
 	}
 
 	if (pdwState)
-		*pdwState = SCARD_STATE_CHANGED | SCARD_STATE_UNKNOWN;
+		*pdwState = state;
 
 	if (pdwProtocol)
-		*pdwProtocol = SCARD_PROTOCOL_T1;
+		*pdwProtocol = protocol;
 
 	if (pcbAtrLen) {
 		LPBYTE dst = pbAtr;
 		if (pbAtr) {
 			if (*pcbAtrLen == SCARD_AUTOALLOCATE) {
-				mem2 = scmalloc(hContext, sizeof(kBCAS_ATR));
+				mem2 = scmalloc(hContext, atr_len);
 				if (!mem2) {
 					scfree(hContext, mem1);
 					return SCARD_E_NO_MEMORY;
 				}
 				dst = *(LPBYTE *)pbAtr = mem2;
 			}
-			else if (*pcbAtrLen < sizeof(kBCAS_ATR)) {
-				*pcbAtrLen = sizeof(kBCAS_ATR);
+			else if (*pcbAtrLen < atr_len) {
+				*pcbAtrLen = atr_len;
 				scfree(hContext, mem1);
 				return SCARD_E_INSUFFICIENT_BUFFER;
 			}
-			memcpy(dst, kBCAS_ATR, sizeof(kBCAS_ATR));
+			memcpy(dst, atr, atr_len);
 		}
-		*pcbAtrLen = sizeof(kBCAS_ATR);
+		*pcbAtrLen = atr_len;
 	}
 
 	return SCARD_S_SUCCESS;

@@ -89,6 +89,12 @@ static void addref_tr(void *self) {
 	_this->refcount += 1;
 }
 
+static LONG status_tr(void *self, LPDWORD state, LPDWORD protocol, LPBYTE atr, LPDWORD atr_len) {
+	private_data_tr_t *_this = private_data_tr(self);
+	/* リーダー名と AUTOALLOCATE の所有権は Hub 側に残し、カードの状態だけを取得する。 */
+	return _this->fs->SCardStatusA(_this->card, NULL, NULL, state, protocol, atr, atr_len);
+}
+
 static scard_trans_t *trans_create(functionset_t *fs, SCARDHANDLE hCard, LPCTSTR dllpath) {
 	private_data_tr_t *p;
 	scard_trans_t *e;
@@ -107,6 +113,7 @@ static scard_trans_t *trans_create(functionset_t *fs, SCARDHANDLE hCard, LPCTSTR
 	SETMETHOD(transmit);
 	SETMETHOD(addref);
 #undef SETMETHOD
+	e->status = fs->SCardStatusA ? status_tr : NULL;
 
 	p->fs   = fs;
 	p->card = hCard;
@@ -279,6 +286,23 @@ static LPCTSTR dllpath_dl(void *self) {
 	return _this->dllpath;
 }
 
+static LONG reader_state_dl(void *self, LPCSTR reader, LPSCARD_READERSTATEA state) {
+	private_data_dl_t *_this = private_data_dl(self);
+	SCARD_READERSTATEA actual = *state;
+	LONG result;
+	if (!_this->fs.SCardGetStatusChangeA)
+		return SCARD_E_UNSUPPORTED_FEATURE;
+	/* 重複名に付けた Hub の別名を下位 DLL に渡さない。 */
+	actual.szReader = reader;
+	result = _this->fs.SCardGetStatusChangeA(_this->context, 0, &actual, 1);
+	if (result == SCARD_S_SUCCESS || result == SCARD_E_TIMEOUT) {
+		state->dwEventState = actual.dwEventState;
+		state->cbAtr = actual.cbAtr;
+		memcpy(state->rgbAtr, actual.rgbAtr, sizeof(state->rgbAtr));
+	}
+	return result;
+}
+
 static transmit_hook_t get_transmit_hook_dl(void *self) {
 	private_data_dl_t *_this = private_data_dl(self);
 	typedef transmit_hook_t(CALLBACK * proc)(void);
@@ -347,6 +371,7 @@ scard_dll_t *create_scard_dll(void) {
 	SETMETHOD(dllpath);
 	SETMETHOD(get_transmit_hook);
 	SETMETHOD(scard_hub_ready);
+	SETMETHOD(reader_state);
 #undef SETMETHOD
 
 	return e;

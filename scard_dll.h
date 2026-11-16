@@ -37,6 +37,7 @@ struct scard_dll_t {
 	/* 以下、SCardHub専用DLL用 */
 	transmit_hook_t (*get_transmit_hook)(void *self);
 	BOOL (*scard_hub_ready)(void *self, HINSTANCE hHubInstance);
+	LONG (*reader_state)(void *self, LPCSTR reader, LPSCARD_READERSTATEA state);
 };
 
 /* SCardTransmit関数オブジェクト */
@@ -51,6 +52,7 @@ struct scard_trans_t {
 					LPBYTE pbRecvBuffer,
 					LPDWORD pcbRecvLength);
 	void (*addref)(void *self);
+	LONG (*status)(void *self, LPDWORD state, LPDWORD protocol, LPBYTE atr, LPDWORD atr_len);
 };
 
 extern scard_dll_t *create_scard_dll(void);

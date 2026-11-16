@@ -1,0 +1,9 @@
+EXPORTS
+SCardEstablishContext
+SCardReleaseContext
+SCardListReadersA
+SCardConnectA
+SCardDisconnect
+SCardTransmit
+SCardStatusA
+SCardGetStatusChangeA

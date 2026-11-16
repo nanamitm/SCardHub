@@ -43,6 +43,8 @@ extern BOOL list_readersW(DWORD *pcchReaders, LPWSTR *pszReaders);
 /****************************************************************************/
 extern BOOL is_fakereaderA(LPCSTR szReader);
 extern BOOL is_fakereaderW(LPCWSTR szReader);
+extern LONG reader_stateA(LPCSTR reader, LPSCARD_READERSTATEA state);
+extern LONG reader_stateW(LPCWSTR reader, LPSCARD_READERSTATEA state);
 
 /****************************************************************************/
 extern LONG card_connectA(SCARDCONTEXT hContext, LPCSTR  szReader, DWORD dwShareMode, DWORD dwPreferredProtocols, LPSCARDHANDLE phCard, LPDWORD pdwActiveProtocol);
